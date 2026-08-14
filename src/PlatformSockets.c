@@ -1,5 +1,21 @@
 #include "Limelight-internal.h"
 
+// LumeN socket-overrides state (ADR 0026 / US-079). Static because
+// moonlight-common-c is single-instance; touched only between
+// LiStopConnection and LiStartConnection.
+static LIMELIGHT_SOCKET_OVERRIDES lumenSocketOverrides;
+static bool lumenSocketOverridesActive;
+
+void LiSetSocketOverrides(const LIMELIGHT_SOCKET_OVERRIDES* overrides) {
+    if (overrides) {
+        lumenSocketOverrides = *overrides;
+        lumenSocketOverridesActive = true;
+    } else {
+        lumenSocketOverridesActive = false;
+        memset(&lumenSocketOverrides, 0, sizeof(lumenSocketOverrides));
+    }
+}
+
 #define TEST_PORT_TIMEOUT_SEC 3
 
 #define RCV_BUFFER_SIZE_MIN  32767
@@ -292,6 +308,28 @@ SOCKET bindUdpSocket(int addressFamily, struct sockaddr_storage* localAddr, SOCK
     LC_SOCKADDR bindAddr;
     int err;
 
+    // LumeN socket-overrides fast path (ADR 0026 / US-079). When
+    // a userspace stack (tsnet) has provided a bind hook, use it
+    // instead of the default createSocket()+bind() dance. Skip the
+    // wildcard-bind fixup below because the userspace stack decides
+    // its own local address.
+    if (lumenSocketOverridesActive && lumenSocketOverrides.bindUdp) {
+        intptr_t fd = lumenSocketOverrides.bindUdp(
+            lumenSocketOverrides.context,
+            addressFamily,
+            (localAddr && localAddr->ss_family != 0) ? (const void*)localAddr : NULL,
+            (int)addrLen);
+        if (fd < 0) {
+            return INVALID_SOCKET;
+        }
+        s = (SOCKET)fd;
+
+        // QoS + rcvbuf tuning still applies — those are setsockopt()
+        // calls the returned fd must tolerate. Skip to the tuning
+        // block below by jumping past the default bind() path.
+        goto UdpTuning;
+    }
+
     s = createSocket(addressFamily, SOCK_DGRAM, IPPROTO_UDP, false);
     if (s == INVALID_SOCKET) {
         return INVALID_SOCKET;
@@ -329,6 +367,7 @@ SOCKET bindUdpSocket(int addressFamily, struct sockaddr_storage* localAddr, SOCK
         return INVALID_SOCKET;
     }
 
+UdpTuning:
 #if defined(LC_DARWIN)
     {
         // Disable SIGPIPE on iOS
@@ -453,6 +492,27 @@ SOCKET connectTcpSocket(struct sockaddr_storage* dstaddr, SOCKADDR_LEN addrlen, 
     struct pollfd pfd;
     int err;
     int val;
+
+    // LumeN socket-overrides fast path (ADR 0026 / US-079). When
+    // a userspace stack has provided a dial hook, delegate the
+    // whole connect() dance to it — including timeout enforcement.
+    // The returned fd must be usable with subsequent send/recv/poll/
+    // close/setsockopt calls that ControlStream / RtspConnection /
+    // etc. perform on it. We skip the MTU/MSS setsockopt block below
+    // because a userspace stack does its own path-MTU handling and
+    // TCP_NOOPT / IP_MTU_DISCOVER may not be meaningful on a virtual fd.
+    if (lumenSocketOverridesActive && lumenSocketOverrides.dialTcp) {
+        intptr_t fd = lumenSocketOverrides.dialTcp(
+            lumenSocketOverrides.context,
+            (const void*)dstaddr,
+            (int)addrlen,
+            port,
+            timeoutSec);
+        if (fd < 0) {
+            return INVALID_SOCKET;
+        }
+        return (SOCKET)fd;
+    }
 
     // Create a non-blocking TCP socket
     s = createSocket(dstaddr->ss_family, SOCK_STREAM, IPPROTO_TCP, true);
