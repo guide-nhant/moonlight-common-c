@@ -1018,6 +1018,70 @@ void LiRequestIdrFrame(void);
 #define LI_FF_CONTROLLER_TOUCH_EVENTS 0x02 // LiSendControllerTouchEvent() supported
 uint32_t LiGetHostFeatureFlags(void);
 
+// ---------------------------------------------------------------------------
+// LumeN downstream extension (ADR 0026 / US-079): pluggable socket overrides.
+//
+// When a LIMELIGHT_SOCKET_OVERRIDES table is registered, connectTcpSocket()
+// and bindUdpSocket() route through the caller-provided dialTcp / bindUdp
+// callbacks instead of the default POSIX socket()+connect() / socket()+bind()
+// path. The callbacks MUST return real POSIX file descriptors — all other
+// socket operations moonlight-common-c performs (recv/send/poll/close/
+// setsockopt) run against the returned fd unchanged. This lets an iOS
+// client use Tailscale's userspace networking stack (tsnet) without needing
+// a system-level VPN interface: tsnet hands us an fd whose read/write
+// bytes flow over WireGuard via a Go worker.
+//
+// Register once before LiStartConnection and clear (pass NULL) after
+// LiStopConnection so state does not leak across sessions. Not thread-safe
+// with concurrent connections — safe to touch between them because
+// moonlight-common-c is single-instance (LiStartConnection assumes one
+// active session).
+//
+// The struct uses portable primitive types instead of platform typedefs
+// (SOCKET / SOCKADDR_LEN) because those live in PlatformSockets.h which is
+// internal to moonlight-common-c. The callee receives:
+//   - dstaddr / localAddr as `const void*` pointing to a `struct
+//     sockaddr_storage` (cast back to the concrete family inside).
+//   - the returned fd as an `intptr_t` — fits both POSIX `int` and
+//     Windows `UINT_PTR`. Return -1 on failure; the library maps that to
+//     INVALID_SOCKET internally.
+//
+// Not upstream. Deviation from moonlight-common-c is recorded in
+// engine/client/UPSTREAM.md.
+
+typedef struct _LIMELIGHT_SOCKET_OVERRIDES {
+    // Opaque pointer forwarded to every callback; unowned by the library.
+    void* context;
+
+    // Open a connected TCP socket to (dstaddr, port) with a timeout.
+    // dstaddr points to a struct sockaddr_storage. Return -1 on failure.
+    // The returned fd must be usable with standard socket calls (recv,
+    // send, poll, close, setsockopt, ...). moonlight-common-c will still
+    // call TCP tuning setsockopts on the returned fd — a fd from a
+    // userspace stack should tolerate those or ignore them silently.
+    intptr_t (*dialTcp)(void* context,
+                        const void* dstaddr,
+                        int addrlen,
+                        unsigned short port,
+                        int timeoutSec);
+
+    // Bind a UDP socket to (localAddr) or, when localAddr is NULL / has a
+    // zero family, a wildcard bind in the specified addressFamily. Return
+    // -1 on failure. The library performs SO_RCVBUF and QoS setsockopts
+    // on the returned fd; the same tolerance requirement as dialTcp applies.
+    intptr_t (*bindUdp)(void* context,
+                        int addressFamily,
+                        const void* localAddr,
+                        int addrLen);
+} LIMELIGHT_SOCKET_OVERRIDES, *PLIMELIGHT_SOCKET_OVERRIDES;
+
+// Register a socket overrides table. Pass NULL to reset to the default
+// POSIX / Winsock path. A copy of the struct is taken; the caller does
+// not need to keep it live past this call, but the `context` pointer and
+// the function pointers themselves must remain valid until the next call
+// to LiSetSocketOverrides (typically after LiStopConnection).
+void LiSetSocketOverrides(const LIMELIGHT_SOCKET_OVERRIDES* overrides);
+
 #ifdef __cplusplus
 }
 #endif
