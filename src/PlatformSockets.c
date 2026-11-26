@@ -68,6 +68,90 @@ bool lumenSocketOverridesAreActive(void) {
     return lumenSocketOverridesActive;
 }
 
+// ENet control-stream socket hooks (US-107 phase 2 / ADR 0030). ENet makes
+// its own UDP socket, so bindUdpSocket() never sees it. When the embedder
+// supplies bindUdp + both datagram hooks, ENet gets its socket from bindUdp
+// and frames every datagram through sendToUdp / recvFromUdp, exactly like
+// the RTP sockets. Without them (desktop) ENet keeps its stock socket path.
+static ENetSocket lumenEnetCreate(void* context, int af) {
+    intptr_t fd;
+
+    (void)context;
+    fd = lumenSocketOverrides.bindUdp(lumenSocketOverrides.context, af, NULL, 0);
+    if (fd < 0) {
+        Limelog("LumeN: bindUdp override failed for the ENet socket\n");
+        return ENET_SOCKET_NULL;
+    }
+    lumenTrackOverrideUdpSocket((SOCKET)fd);
+    return (ENetSocket)fd;
+}
+
+static int lumenEnetIsTransientError(int err) {
+    return err == EWOULDBLOCK || err == EAGAIN || err == EINTR;
+}
+
+static int lumenEnetSend(void* context, ENetSocket socket, const ENetAddress* peerAddress,
+                         const ENetBuffer* buffers, size_t bufferCount) {
+    // ENet hands us a header + command buffers; the hook takes one datagram.
+    // Control traffic is low-rate and bounded by the protocol MTU, so one
+    // stack copy is cheaper than widening the hook ABI to scatter/gather.
+    char packet[ENET_PROTOCOL_MAXIMUM_MTU];
+    size_t length = 0;
+    size_t i;
+    int err;
+
+    (void)context;
+    if (peerAddress == NULL) {
+        return -1;
+    }
+    for (i = 0; i < bufferCount; i++) {
+        if (buffers[i].dataLength > sizeof(packet) - length) {
+            Limelog("LumeN: ENet datagram exceeds %d bytes\n", ENET_PROTOCOL_MAXIMUM_MTU);
+            return -1;
+        }
+        memcpy(&packet[length], buffers[i].data, buffers[i].dataLength);
+        length += buffers[i].dataLength;
+    }
+
+    err = sendToUdpSocket((SOCKET)socket, packet, (int)length,
+                          (const struct sockaddr*)&peerAddress->address,
+                          (SOCKADDR_LEN)peerAddress->addressLength);
+    if (err < 0) {
+        return lumenEnetIsTransientError(LastSocketError()) ? 0 : -1;
+    }
+    return err;
+}
+
+static int lumenEnetReceive(void* context, ENetSocket socket, ENetAddress* peerAddress,
+                            ENetBuffer* buffers, size_t bufferCount) {
+    struct sockaddr_storage source;
+    int sourceLength = sizeof(source);
+    int err;
+
+    (void)context;
+    if (bufferCount != 1 || lumenSocketOverrides.recvFromUdp == NULL) {
+        return -1;
+    }
+
+    memset(&source, 0, sizeof(source));
+    err = lumenSocketOverrides.recvFromUdp(lumenSocketOverrides.context, (intptr_t)socket,
+                                           buffers[0].data, (int)buffers[0].dataLength,
+                                           &source, &sourceLength);
+    if (err < 0) {
+        return lumenEnetIsTransientError(LastSocketError()) ? 0 : -1;
+    }
+    if (err > 0 && peerAddress != NULL) {
+        memcpy(&peerAddress->address, &source, sizeof(source));
+        peerAddress->addressLength = (socklen_t)sourceLength;
+    }
+    return err;
+}
+
+static void lumenEnetDestroy(void* context, ENetSocket socket) {
+    (void)context;
+    closeSocket((SOCKET)socket);
+}
+
 void LiSetSocketOverrides(const LIMELIGHT_SOCKET_OVERRIDES* overrides) {
     if (overrides) {
         lumenSocketOverrides = *overrides;
@@ -76,6 +160,23 @@ void LiSetSocketOverrides(const LIMELIGHT_SOCKET_OVERRIDES* overrides) {
         lumenSocketOverridesActive = false;
         memset(&lumenSocketOverrides, 0, sizeof(lumenSocketOverrides));
         lumenOverrideUdpSocketCount = 0;
+    }
+
+    if (lumenSocketOverridesActive &&
+            lumenSocketOverrides.bindUdp != NULL &&
+            lumenSocketOverrides.sendToUdp != NULL &&
+            lumenSocketOverrides.recvFromUdp != NULL) {
+        ENetSocketHooks hooks;
+
+        memset(&hooks, 0, sizeof(hooks));
+        hooks.create = lumenEnetCreate;
+        hooks.send = lumenEnetSend;
+        hooks.receive = lumenEnetReceive;
+        hooks.destroy = lumenEnetDestroy;
+        enet_socket_set_hooks(&hooks);
+    }
+    else {
+        enet_socket_set_hooks(NULL);
     }
 }
 

@@ -1,6 +1,7 @@
 [submodule "enet"]
 	path = enet
-	url = https://github.com/cgutman/enet.git
+	url = https://github.com/guide-nhant/enet.git
+	branch = lumen/tsnet-udp-envelope-v6.2.0
 [submodule "nanors"]
 	path = nanors
 	url = https://github.com/sleepybishop/nanors.git

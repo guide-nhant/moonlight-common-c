@@ -1085,6 +1085,9 @@ typedef struct _LIMELIGHT_SOCKET_OVERRIDES {
     // (treated like a receive timeout). addr / addrLen in recvFromUdp may be
     // NULL; when non-NULL, *addrLen is in/out like recvfrom(). Leave both
     // NULL to keep raw sendto()/recvfrom() on override-provided fds.
+    // When bindUdp and both hooks are set, the ENet control stream socket
+    // also comes from bindUdp and uses these hooks (enet_socket_set_hooks,
+    // US-107 phase 2); otherwise ENet keeps its own kernel socket.
     int (*sendToUdp)(void* context,
                      intptr_t fd,
                      const void* data,
