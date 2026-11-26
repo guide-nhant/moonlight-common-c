@@ -129,6 +129,12 @@ SOCKET bindUdpSocket(int addressFamily, struct sockaddr_storage* localAddr, SOCK
 int enableNoDelay(SOCKET s);
 int setSocketNonBlocking(SOCKET s, bool enabled);
 int recvUdpSocket(SOCKET s, char* buffer, int size, bool useSelect);
+// LumeN (US-107 / ADR 0030): true while a LIMELIGHT_SOCKET_OVERRIDES table
+// is registered (userspace network stack owns the data path).
+bool lumenSocketOverridesAreActive(void);
+// LumeN (US-107 / ADR 0030): sendto() that honours the datagram I/O hook
+// for sockets created through LIMELIGHT_SOCKET_OVERRIDES.bindUdp.
+int sendToUdpSocket(SOCKET s, const char* buffer, int size, const struct sockaddr* dstaddr, SOCKADDR_LEN addrlen);
 void shutdownTcpSocket(SOCKET s);
 int setNonFatalRecvTimeoutMs(SOCKET s, int timeoutMs);
 void closeSocket(SOCKET s);

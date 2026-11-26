@@ -6,6 +6,68 @@
 static LIMELIGHT_SOCKET_OVERRIDES lumenSocketOverrides;
 static bool lumenSocketOverridesActive;
 
+// Sockets returned by lumenSocketOverrides.bindUdp (US-107 / ADR 0030).
+// Only these route datagram I/O through sendToUdp / recvFromUdp; every
+// other socket (and every socket on desktop, where no override is
+// registered) keeps raw sendto()/recvfrom(). A session opens at most a
+// handful (video, audio, STUN); registered from the connection thread
+// during LiStartConnection, cleared in closeSocket(). Reads from the
+// receive threads race only with closeSocket() of the same socket, which
+// the library already serialises (threads are joined before close).
+#define LUMEN_MAX_OVERRIDE_UDP_SOCKETS 8
+static SOCKET lumenOverrideUdpSockets[LUMEN_MAX_OVERRIDE_UDP_SOCKETS];
+static int lumenOverrideUdpSocketCount;
+
+static void lumenTrackOverrideUdpSocket(SOCKET s) {
+    if (lumenOverrideUdpSocketCount < LUMEN_MAX_OVERRIDE_UDP_SOCKETS) {
+        lumenOverrideUdpSockets[lumenOverrideUdpSocketCount++] = s;
+    }
+    else {
+        Limelog("LumeN: override UDP socket table full; datagram hooks disabled for socket\n");
+    }
+}
+
+static void lumenUntrackOverrideUdpSocket(SOCKET s) {
+    for (int i = 0; i < lumenOverrideUdpSocketCount; i++) {
+        if (lumenOverrideUdpSockets[i] == s) {
+            lumenOverrideUdpSockets[i] = lumenOverrideUdpSockets[--lumenOverrideUdpSocketCount];
+            return;
+        }
+    }
+}
+
+static bool lumenUsesDatagramHooks(SOCKET s) {
+    if (!lumenSocketOverridesActive) {
+        return false;
+    }
+    for (int i = 0; i < lumenOverrideUdpSocketCount; i++) {
+        if (lumenOverrideUdpSockets[i] == s) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static int lumenRecvFrom(SOCKET s, char* buffer, int size) {
+    if (lumenSocketOverrides.recvFromUdp != NULL && lumenUsesDatagramHooks(s)) {
+        return lumenSocketOverrides.recvFromUdp(lumenSocketOverrides.context,
+                                                (intptr_t)s, buffer, size, NULL, NULL);
+    }
+    return (int)recvfrom(s, buffer, size, 0, NULL, NULL);
+}
+
+int sendToUdpSocket(SOCKET s, const char* buffer, int size, const struct sockaddr* dstaddr, SOCKADDR_LEN addrlen) {
+    if (lumenSocketOverrides.sendToUdp != NULL && lumenUsesDatagramHooks(s)) {
+        return lumenSocketOverrides.sendToUdp(lumenSocketOverrides.context,
+                                              (intptr_t)s, buffer, size, dstaddr, (int)addrlen);
+    }
+    return (int)sendto(s, buffer, size, 0, dstaddr, addrlen);
+}
+
+bool lumenSocketOverridesAreActive(void) {
+    return lumenSocketOverridesActive;
+}
+
 void LiSetSocketOverrides(const LIMELIGHT_SOCKET_OVERRIDES* overrides) {
     if (overrides) {
         lumenSocketOverrides = *overrides;
@@ -13,6 +75,7 @@ void LiSetSocketOverrides(const LIMELIGHT_SOCKET_OVERRIDES* overrides) {
     } else {
         lumenSocketOverridesActive = false;
         memset(&lumenSocketOverrides, 0, sizeof(lumenSocketOverrides));
+        lumenOverrideUdpSocketCount = 0;
     }
 }
 
@@ -212,13 +275,13 @@ int recvUdpSocket(SOCKET s, char* buffer, int size, bool useSelect) {
             }
 
             // This won't block since the socket is readable
-            err = (int)recvfrom(s, buffer, size, 0, NULL, NULL);
+            err = lumenRecvFrom(s, buffer, size);
         }
         else {
             // The caller has already configured a timeout on this
             // socket via SO_RCVTIMEO, so we can avoid a syscall
             // for each packet.
-            err = (int)recvfrom(s, buffer, size, 0, NULL, NULL);
+            err = lumenRecvFrom(s, buffer, size);
             if (err < 0 &&
                     (LastSocketError() == EWOULDBLOCK ||
                      LastSocketError() == EINTR ||
@@ -248,6 +311,7 @@ int recvUdpSocket(SOCKET s, char* buffer, int size, bool useSelect) {
 }
 
 void closeSocket(SOCKET s) {
+    lumenUntrackOverrideUdpSocket(s);
 #if defined(LC_WINDOWS) && !defined(NXDK)
     closesocket(s);
 #else
@@ -324,6 +388,7 @@ SOCKET bindUdpSocket(int addressFamily, struct sockaddr_storage* localAddr, SOCK
             return INVALID_SOCKET;
         }
         s = (SOCKET)fd;
+        lumenTrackOverrideUdpSocket(s);
 
         // QoS + rcvbuf tuning still applies — those are setsockopt()
         // calls the returned fd must tolerate. Skip to the tuning

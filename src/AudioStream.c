@@ -54,10 +54,10 @@ static void AudioPingThreadProc(void* context) {
             pingCount++;
             AudioPingPayload.sequenceNumber = BE32(pingCount);
 
-            sendto(rtpSocket, (char*)&AudioPingPayload, sizeof(AudioPingPayload), 0, (struct sockaddr*)&saddr, AddrLen);
+            sendToUdpSocket(rtpSocket, (char*)&AudioPingPayload, sizeof(AudioPingPayload), (struct sockaddr*)&saddr, AddrLen);
         }
         else {
-            sendto(rtpSocket, legacyPingData, sizeof(legacyPingData), 0, (struct sockaddr*)&saddr, AddrLen);
+            sendToUdpSocket(rtpSocket, legacyPingData, sizeof(legacyPingData), (struct sockaddr*)&saddr, AddrLen);
         }
 
         PltSleepMsInterruptible(&udpPingThread, 500);

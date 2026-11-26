@@ -382,6 +382,16 @@ int LiStartConnection(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION stre
     {
         SOCKADDR_LEN localAddrLen;
         err = getLocalAddressByUdpConnect(&RemoteAddr, AddrLen, RtspPortNumber, &LocalAddr, &localAddrLen);
+        if (err != 0 && lumenSocketOverridesAreActive()) {
+            // LumeN (US-107 / ADR 0030): with a userspace stack (tsnet) the
+            // kernel may have no route to the tailnet peer. The local address
+            // is only a bind hint; the override picks its own, so continue
+            // with a wildcard LocalAddr instead of failing the stage.
+            Limelog("local addr unresolved (%d); continuing with socket overrides\n", err);
+            memset(&LocalAddr, 0, sizeof(LocalAddr));
+            err = 0;
+            localAddrLen = AddrLen;
+        }
         if (err != 0) {
             Limelog("failed to resolve local addr: %d\n", err);
             ListenerCallbacks.stageFailed(STAGE_NAME_RESOLUTION, err);

@@ -1073,6 +1073,30 @@ typedef struct _LIMELIGHT_SOCKET_OVERRIDES {
                         int addressFamily,
                         const void* localAddr,
                         int addrLen);
+
+    // Optional datagram I/O hooks (US-107 / ADR 0030). When non-NULL,
+    // every datagram moonlight-common-c sends or receives on a socket that
+    // bindUdp returned goes through these instead of sendto()/recvfrom().
+    // This lets the fd speak a framed wire (e.g. tsnet's v1 UDP envelope,
+    // which carries the peer address per datagram) while the library keeps
+    // its sendto()/recvfrom() semantics. Both follow the POSIX contract:
+    // return the byte count, or -1 with errno set (EAGAIN / EWOULDBLOCK on
+    // timeout). recvFromUdp may return 0 to mean "nothing usable arrived"
+    // (treated like a receive timeout). addr / addrLen in recvFromUdp may be
+    // NULL; when non-NULL, *addrLen is in/out like recvfrom(). Leave both
+    // NULL to keep raw sendto()/recvfrom() on override-provided fds.
+    int (*sendToUdp)(void* context,
+                     intptr_t fd,
+                     const void* data,
+                     int length,
+                     const void* dstaddr,
+                     int addrlen);
+    int (*recvFromUdp)(void* context,
+                       intptr_t fd,
+                       void* buffer,
+                       int length,
+                       void* srcaddr,
+                       int* addrlen);
 } LIMELIGHT_SOCKET_OVERRIDES, *PLIMELIGHT_SOCKET_OVERRIDES;
 
 // Register a socket overrides table. Pass NULL to reset to the default

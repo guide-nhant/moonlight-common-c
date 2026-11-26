@@ -71,10 +71,10 @@ static void VideoPingThreadProc(void* context) {
             pingCount++;
             VideoPingPayload.sequenceNumber = BE32(pingCount);
 
-            sendto(rtpSocket, (char*)&VideoPingPayload, sizeof(VideoPingPayload), 0, (struct sockaddr*)&saddr, AddrLen);
+            sendToUdpSocket(rtpSocket, (char*)&VideoPingPayload, sizeof(VideoPingPayload), (struct sockaddr*)&saddr, AddrLen);
         }
         else {
-            sendto(rtpSocket, legacyPingData, sizeof(legacyPingData), 0, (struct sockaddr*)&saddr, AddrLen);
+            sendToUdpSocket(rtpSocket, legacyPingData, sizeof(legacyPingData), (struct sockaddr*)&saddr, AddrLen);
         }
 
         PltSleepMsInterruptible(&udpPingThread, 500);
